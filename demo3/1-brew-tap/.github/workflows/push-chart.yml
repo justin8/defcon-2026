@@ -1,0 +1,156 @@
+name: Push Chart
+
+on:
+  workflow_call:
+    inputs:
+      chart_version:
+        description: Version to use for the Helm chart (e.g., "0.0.0" or "1.2.3").
+        required: true
+        type: string
+      app_version:
+        description: App version to embed in the chart (e.g., "0.0.0" or "v1.2.3").
+        required: true
+        type: string
+      additional_tags:
+        description: Space-separated additional tags to apply to the chart.
+        required: false
+        type: string
+        default: ""
+      changelog:
+        description: Artifact Hub changelog annotation.
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      chart_version:
+        description: Version to use for the Helm chart (e.g., "0.0.0" or "1.2.3").
+        required: true
+        type: string
+      app_version:
+        description: App version to embed in the chart (e.g., "0.0.0" or "v1.2.3").
+        required: true
+        type: string
+      additional_tags:
+        description: Space-separated additional tags to apply to the chart.
+        required: false
+        type: string
+        default: ""
+      changelog:
+        description: Artifact Hub changelog annotation.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  actions: write
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  publish:
+    name: Package and publish chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set metadata
+        id: meta
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          REPO_OWNER=$(echo "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')
+          CHART_NAME=$(awk -F': ' '$1=="name"{print $2}' dist/chart/Chart.yaml | tr -d '"')
+          CHART_REF="ghcr.io/${REPO_OWNER}/charts/${CHART_NAME}"
+          echo "chart_ref=${CHART_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inject changelog annotation
+        if: inputs.changelog != ''
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          yq -i '.annotations."artifacthub.io/changes" = strenv(CHANGELOG)' dist/chart/Chart.yaml
+
+      - name: Package chart
+        env:
+          CHART_VERSION: ${{ inputs.chart_version }}
+          APP_VERSION: ${{ inputs.app_version }}
+        run: |
+          mkdir -p dist/chart-packages
+          helm package dist/chart \
+            --version "${CHART_VERSION}" \
+            --app-version "${APP_VERSION}" \
+            --destination dist/chart-packages
+
+      - name: Push chart
+        id: push
+        env:
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+        run: |
+          PUSH_OUTPUT=$(helm push dist/chart-packages/*.tgz \
+            "oci://$(dirname "${CHART_REF}")" 2>&1)
+          echo "$PUSH_OUTPUT"
+          DIGEST=$(echo "$PUSH_OUTPUT" | grep "Digest:" | awk '{print $2}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+
+      - name: Apply additional tags
+        if: inputs.additional_tags != ''
+        env:
+          ADDITIONAL_TAGS: ${{ inputs.additional_tags }}
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+          CHART_VERSION: ${{ inputs.chart_version }}
+        run: |
+          for tag in $ADDITIONAL_TAGS; do
+            oras tag \
+              "${CHART_REF}:${CHART_VERSION}" \
+              "${tag}"
+          done
+
+      - name: Push Artifact Hub metadata
+        # https://artifacthub.io/docs/topics/repositories/helm-charts/#oci-support
+        env:
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+        run: |
+          oras push \
+            "${CHART_REF}:artifacthub.io" \
+            --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+            dist/chart/artifacthub-repo.yaml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Sign chart
+        env:
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes \
+            "${CHART_REF}@${CHART_DIGEST}"
+
+      - name: Verify chart signature
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${CHART_REF}@${CHART_DIGEST}"

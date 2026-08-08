@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+  attestations: write
+  contents: write
+  id-token: write
+  packages: write
+
+jobs:
+  meta:
+    name: Metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image_repo: ${{ steps.meta.outputs.image_repo }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      additional_tags: ${{ steps.meta.outputs.additional_tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set metadata
+        id: meta
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          REPO_OWNER=$(echo "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          # Tags created on main push: <sha>-main, main
+          # Tags created on PR: PR-<number>
+          IMAGE_TAG="${SHORT_SHA}-main"
+          ADDITIONAL_TAGS="main"
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            IMAGE_TAG="PR-${PR_NUMBER}"
+            ADDITIONAL_TAGS=""
+          fi
+          echo "image_repo=ghcr.io/${REPO_OWNER}/pocket-id-operator" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "additional_tags=${ADDITIONAL_TAGS}" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Tests
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/test.yml
+    secrets: inherit
+
+  lint:
+    name: Lint
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/lint.yml
+    secrets: inherit
+
+  build:
+    name: Build Image
+    needs: [meta]
+    permissions:
+      actions: write
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/build-push-image.yml
+    with:
+      image_repo: ${{ needs.meta.outputs.image_repo }}
+      image_tag: ${{ needs.meta.outputs.image_tag }}
+      additional_tags: ${{ needs.meta.outputs.additional_tags }}
+      push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    secrets: inherit
+
+  e2e:
+    name: E2E Tests
+    needs:
+      - meta
+      - build
+    permissions:
+      actions: write
+      contents: read
+      packages: read
+    uses: ./.github/workflows/test-e2e.yml
+    with:
+      image_repo: ${{ needs.meta.outputs.image_repo }}
+      image_tag: ${{ needs.meta.outputs.image_tag }}
+    secrets: inherit
+
+  e2e-latest-release:
+    name: E2E Tests (Latest Release)
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'pocket-id-upgrade') }}
+    permissions:
+      actions: write
+      contents: read
+      packages: read
+    uses: ./.github/workflows/test-e2e.yml
+    with:
+      latest_release: true
+    secrets: inherit
+
+  test-chart:
+    name: Test Chart
+    needs:
+      - meta
+      - build
+    permissions:
+      actions: write
+      contents: read
+      packages: read
+    uses: ./.github/workflows/test-chart.yml
+    with:
+      image_repo: ${{ needs.meta.outputs.image_repo }}
+      image_tag: ${{ needs.meta.outputs.image_tag }}
+    secrets: inherit
+

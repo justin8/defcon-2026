@@ -1,0 +1,65 @@
+name: Re-sign Chart
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Chart version to re-sign (e.g. 0.4.5)
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  packages: write
+
+jobs:
+  resign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set metadata
+        id: meta
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          REPO_OWNER=$(echo "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "chart_ref=ghcr.io/${REPO_OWNER}/charts/pocket-id-operator" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get chart digest
+        id: digest
+        env:
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          DIGEST=$(docker buildx imagetools inspect \
+            "${CHART_REF}:${VERSION}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Sign chart
+        env:
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+          CHART_DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          cosign sign --yes \
+            "${CHART_REF}@${CHART_DIGEST}"
+
+      - name: Verify chart signature
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CHART_REF: ${{ steps.meta.outputs.chart_ref }}
+          CHART_DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${CHART_REF}@${CHART_DIGEST}"

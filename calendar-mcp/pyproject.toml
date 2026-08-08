@@ -1,0 +1,21 @@
+[project]
+name = "calendar-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Justin Dray", email = "justin@dray.be" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp",
+    "requests>=2.32.0",
+]
+
+[project.scripts]
+calendar-mcp = "calendar_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+

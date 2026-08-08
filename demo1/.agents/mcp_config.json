@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "calendar-mcp": {
+      "command": "uvx",
+      "args": [
+        "git+ssh://git@github.com/justin8/calendar-mcp"
+      ],
+      "eager": true
+    }
+  }
+}

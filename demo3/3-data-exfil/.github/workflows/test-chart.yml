@@ -1,0 +1,164 @@
+name: Test Chart
+
+on:
+  workflow_call:
+    inputs:
+      image_repo:
+        description: Image repository (e.g., ghcr.io/owner/pocket-id-operator).
+        required: true
+        type: string
+      image_tag:
+        description: Image tag to use for chart installation test.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_repo:
+        description: Image repository (e.g., ghcr.io/owner/pocket-id-operator).
+        required: true
+        type: string
+      image_tag:
+        description: Image tag to use for chart installation test.
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  packages: read
+
+env:
+  # renovate: datasource=github-releases depName=kubernetes-sigs/kind
+  KIND_VERSION: v0.31.0
+  # renovate: datasource=github-releases depName=kubernetes/kubernetes
+  KUBECTL_VERSION: v1.35.3
+
+jobs:
+  test:
+    name: Lint and install test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+
+      - name: Resolve latest release
+        id: release
+        uses: ./.github/actions/latest-release
+        with:
+          token: ${{ github.token }}
+
+      - name: Lint Helm chart with instance
+        run: helm lint dist/chart --values .github/helm-test-values.yaml
+
+      - name: Lint Helm chart without instance
+        run: helm lint dist/chart --set instance.enabled=false
+
+      - name: Package chart
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          mkdir -p dist/chart-packages
+          helm package dist/chart \
+            --version "0.0.0" \
+            --app-version "${IMAGE_TAG}" \
+            --destination dist/chart-packages
+
+      - name: Download image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: operator-image-${{ inputs.image_tag }}
+          path: /tmp
+
+      - name: Load image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: docker load -i "/tmp/operator-image-${IMAGE_TAG}.tar"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          kubectl_version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Load image into kind
+        env:
+          IMAGE_REPO: ${{ inputs.image_repo }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: kind load docker-image "${IMAGE_REPO}:${IMAGE_TAG}" --name chart-testing
+
+      - name: Install released chart
+        id: install-released
+        continue-on-error: true
+        env:
+          CHART: ${{ steps.release.outputs.chart }}
+          CHART_VERSION: ${{ steps.release.outputs.chart_version }}
+          IMAGE_REPO: ${{ inputs.image_repo }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          helm install test-release "${CHART}" \
+            --version "${CHART_VERSION}" \
+            --create-namespace \
+            --namespace pocket-id-operator-system \
+            --values .github/helm-test-values.yaml \
+            --set "operator.image.repository=${IMAGE_REPO}" \
+            --set "operator.image.tag=${RELEASE_TAG}" \
+            --wait \
+            --timeout 2m
+
+      - name: Warn if released chart install failed
+        if: steps.install-released.outcome == 'failure'
+        run: |
+          echo "::warning::Released chart install failed — skipping upgrade test. The released chart may have a known issue."
+          helm uninstall test-release --namespace pocket-id-operator-system --ignore-not-found || true
+
+      - name: Upgrade to current chart
+        env:
+          IMAGE_REPO: ${{ inputs.image_repo }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          helm upgrade --install test-release dist/chart-packages/*.tgz \
+            --namespace pocket-id-operator-system \
+            --create-namespace \
+            --values .github/helm-test-values.yaml \
+            --set "operator.image.repository=${IMAGE_REPO}" \
+            --set "operator.image.tag=${IMAGE_TAG}" \
+            --wait \
+            --timeout 2m
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Manager Pod Logs ==="
+          kubectl logs -n pocket-id-operator-system -l control-plane=controller-manager --tail=100 || true
+          echo "=== PocketIDInstance Status ==="
+          kubectl get pocketidinstance -n pocket-id-operator-system -o yaml || true
+          echo "=== PocketIDUser Status ==="
+          kubectl get pocketiduser -n pocket-id-operator-system -o yaml || true
+          echo "=== PocketIDUserGroup Status ==="
+          kubectl get pocketidusergroup -n pocket-id-operator-system -o yaml || true
+          echo "=== Pocket-ID Pod Logs ==="
+          kubectl logs -n pocket-id-operator-system -l app.kubernetes.io/name=pocket-id --tail=100 || true
+          echo "=== All Resources ==="
+          kubectl get all -n pocket-id-operator-system || true
+          echo "=== Pod Describe ==="
+          kubectl describe pods -n pocket-id-operator-system || true
+
+      - name: Verify chart installation
+        run: |
+          helm status test-release --namespace pocket-id-operator-system
+          kubectl get all -n pocket-id-operator-system
+          echo "=== Verifying all expected CRs are present ==="
+          kubectl get pocketidinstance pocket-id -n pocket-id-operator-system
+          kubectl get pocketiduser test-user-1 -n pocket-id-operator-system
+          kubectl get pocketiduser test-user-2 -n pocket-id-operator-system
+          kubectl get pocketidusergroup test-group -n pocket-id-operator-system
+
+      - name: Uninstall test chart
+        if: always()
+        run: |
+          helm uninstall test-release --namespace pocket-id-operator-system || true

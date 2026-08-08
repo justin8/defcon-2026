@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., v1.0.0)"
+        required: true
+        type: string
+
+env:
+  # renovate: datasource=github-releases depName=kubernetes-sigs/controller-tools
+  CONTROLLER_TOOLS_VERSION: v0.20.1
+  # renovate: datasource=github-releases depName=kubernetes-sigs/kustomize
+  KUSTOMIZE_VERSION: v5.7.1
+
+jobs:
+  validate:
+    name: Validate version
+    permissions: {}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+      helm_version: ${{ steps.validate.outputs.helm_version }}
+      image_repo: ${{ steps.validate.outputs.image_repo }}
+    steps:
+      - name: Validate version format
+        id: validate
+        env:
+          VERSION: ${{ inputs.version }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          # Ensure version starts with 'v'
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
+            echo "::error::Version must be in format v0.0.0"
+            exit 1
+          fi
+
+          HELM_VERSION="${VERSION#v}"
+          REPO_OWNER=$(echo "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "helm_version=${HELM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=ghcr.io/${REPO_OWNER}/pocket-id-operator" >> "$GITHUB_OUTPUT"
+
+  generate-changelog:
+    name: Generate Artifact Hub changelog
+    permissions:
+      contents: read
+    needs:
+      - validate
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.changelog.outputs.content }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4.7.1
+        with:
+          config: cliff-artifacthub.toml
+          args: --unreleased --strip header
+  retag-image:
+    name: Retag Docker image
+    permissions:
+      packages: write
+    needs:
+      - validate
+      - generate-changelog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag :main image as release version
+        env:
+          IMAGE_REPO: ${{ needs.validate.outputs.image_repo }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE_REPO}:${VERSION}" \
+            "${IMAGE_REPO}:main"
+
+  publish-chart:
+    name: Publish Helm chart
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
+      packages: write
+    needs:
+      - validate
+      - generate-changelog
+    uses: ./.github/workflows/push-chart.yml
+    with:
+      chart_version: ${{ needs.validate.outputs.helm_version }}
+      app_version: ${{ needs.validate.outputs.version }}
+      changelog: ${{ needs.generate-changelog.outputs.changelog }}
+    secrets: inherit
+
+  tag:
+    name: Create Git tag
+    permissions:
+      contents: write
+    needs:
+      - validate
+      - retag-image
+      - publish-chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check if tag exists
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if git rev-parse "${VERSION}" >/dev/null 2>&1; then
+            echo "::error::Tag ${VERSION} already exists"
+            exit 1
+          fi
+
+      - name: Create and push tag
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+
+  create-release:
+    name: Create GitHub Release
+    permissions:
+      contents: write
+    needs:
+      - validate
+      - tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.validate.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4.7.1
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: /tmp/changelog.md
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Generate install manifest
+        env:
+          IMAGE_REPO: ${{ needs.validate.outputs.image_repo }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          make build-installer IMG="${IMAGE_REPO}:${VERSION}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          gh release create "${VERSION}" \
+            --title "${VERSION}" \
+            --notes-file /tmp/changelog.md \
+            dist/install.yaml \
+            dist/schemas/*.json \
+            dist/chart/values.schema.json

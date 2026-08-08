@@ -1,0 +1,78 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "ignorePaths": [],
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 0,
+  "prHourlyLimit": 0,
+  "automerge": true,
+  "platformAutomerge": true,
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "gitIgnoredAuthors": [
+    "200541989\\+botthebuilder25\\[bot\\]@users\\.noreply\\.github\\.com"
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": [
+        "ghcr.io/aclerici38/pocket-id-operator",
+        "ghcr.io/aclerici38/charts/pocket-id-operator"
+      ],
+      "groupName": "pocket-id-operator",
+      "automergeType": "branch",
+      "ignoreTests": true
+    },
+    {
+      "matchPackageNames": ["ghcr.io/pocket-id/pocket-id"],
+      "automerge": false,
+      "rebaseWhen": "behind-base-branch",
+      "labels": ["pocket-id-upgrade"]
+    },
+    {
+      "matchDatasources": ["golang-version"],
+      "rangeStrategy": "bump"
+    },
+    {
+      "matchPackageNames": ["go", "docker.io/library/golang"],
+      "groupName": "golang",
+      "minimumGroupSize": 2
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?\\n.*?_VERSION \\?= (?<currentValue>.*)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/\\.go$/",
+        "/\\.ya?ml$/",
+        "/^Makefile$/",
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?( extractVersion=(?<extractVersion>.*?))?\\n.*?[\"']?(?<currentValue>v?\\d+\\.\\d+\\.\\d+[^\"'\\s]*)[\"']?",
+        "// renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?( extractVersion=(?<extractVersion>.*?))?\\n.*?[\"']?(?<currentValue>v?\\d+\\.\\d+\\.\\d+[^\"'\\s]*)[\"']?"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
+      "extractVersionTemplate": "{{#if extractVersion}}{{{extractVersion}}}{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/\\.go$/",
+        "/\\.ya?ml$/",
+        "/^Makefile$/",
+        "/\\.md$/"
+      ],
+      "matchStrings": [
+        "(?<depName>ghcr\\.io/(?:pocket-id/pocket-id|aclerici38/(?:charts/)?pocket-id-operator)):(?<currentValue>[^@\"\\s`]+)(?:@(?<currentDigest>[^\"\\s`]+))?"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ]
+}

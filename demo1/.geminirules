@@ -1,0 +1,8 @@
+# MCP Direct Tool Execution Rule
+
+1. **Use Native & Lazy MCP Tool Calls Directly**:
+   - ALWAYS invoke available MCP tools directly (via native MCP tool declarations or `call_mcp_tool`).
+   - For calendar, schedule, or agenda queries, use `call_mcp_tool` with `ServerName: "calendar-mcp"` and `ToolName: "get_calendar_events"`.
+
+2. **No Manual MCP Scripting or Subprocess Wrappers**:
+   - NEVER write Python scripts, shell scripts, CLI wrappers, or subprocess pipelines to query or interact with available MCP tools.
